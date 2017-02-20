@@ -1,0 +1,22 @@
+{
+  "intents": [
+    {
+      "intent": "clearAlarms"
+    },
+    {
+      "intent": "ReportAlarm"
+    },
+    {
+      "intent": "MoreDetail"
+    }
+  ]
+}
+ 
+clearAlarms clear alarms
+clearAlarms clear issue
+clearAlarms clear event
+clearAlarms we are good now
+ReportAlarm What's the issue
+ReportAlarm What's the alarm
+MoreDetail Tell me more about Ben
+MoreDetail What do you know about Ben
