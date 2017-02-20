@@ -1,0 +1,93 @@
+//This was set up in US-East-1 if you want to change regions make sure services are available in that region needed changes are denoted by double asterick 
+
+var Alexa = require('alexa-sdk');
+var APP_ID = undefined; // TODO replace with your app ID (OPTIONAL).
+var recipes = require('./recipes');
+
+exports.handler = function(event, context, callback) {
+    var alexa = Alexa.handler(event, context);
+    alexa.APP_ID = APP_ID;
+    // To enable string internationalization (i18n) features, set a resources object.
+    alexa.resources = languageStrings;
+    alexa.registerHandlers(handlers);
+    alexa.execute();
+};
+
+var handlers = {
+    //Use LaunchRequest, instead of NewSession if you want to use the one-shot model
+    // Alexa, ask [my-skill-invocation-name] to (do something)...
+    'LaunchRequest': function () {
+        this.attributes['speechOutput'] = this.t("WELCOME_MESSAGE", this.t("SKILL_NAME"));
+        // If the user either does not reply to the welcome message or says something that is not
+        // understood, they will be prompted again with this text.
+        this.attributes['repromptSpeech'] = this.t("WELCOME_REPROMT");
+        this.emit(':ask', this.attributes['speechOutput'], this.attributes['repromptSpeech'])
+    },
+var AWS = require('aws-sdk');
+AWS.config.update({region: 'us-east-1'});
+
+//console.log('running node');
+
+var rekognition = new AWS.Rekognition();
+// Enter your IOT Endpoint name here
+var iotdata = new AWS.IotData({endpoint: '**Enter your IOT Endpoint Here**'})
+
+/* Lambda "main": Execution begins here */
+exports.handler = function(event, context, callback)
+{
+  console.log('Processing ' + JSON.stringify(event));
+  for(var i = 0; i < event.Records.length; i++)
+  {
+    if(event.Records[i].s3 && event.Records[i].s3.bucket && event.Records[i].s3.object)
+    {
+      checkWatchlistCollection(event.Records[i].s3.bucket.name,
+                               event.Records[i].s3.object.key,
+                                "1");
+    }
+  }
+
+}
+
+
+    rekognition.searchFacesByImage(params, function(err, data) {
+      if (err){
+        console.log(err, err.stack); // an error occurred
+        if(callback)
+            callback(err, null)
+      }
+      else{
+        //console.log(JSON.stringify(data));           // successful response
+        if(data.FaceMatches && data.FaceMatches.length > 0)
+        {
+          id = data.FaceMatches[0].Face.ExternalImageId;
+          if(!id)
+          {
+            id = data.FaceMatches[0].Face.ImageId;
+          }
+          console.log('Watchlist matched -- ' + id);
+
+          var watchlistHit = {
+            S3Object: {
+         // Have to change Bucket name below     
+              Bucket: bucket, // '**Enter Rekognizer bucket name',
+              Name: key // 'WatchList/*',
+            },
+            WatchlistCollectionMatchId: id
+          };
+
+          var params = {
+            topic: '/nato/watchlist', /* required */
+            payload: JSON.stringify(watchlistHit),
+            qos: 0
+          };
+          iotdata.publish(params, function(err, data) {
+            if (err) console.log(err, err.stack); // an error occurred
+            else     console.log('public success: ' + data);           // successful response
+          });
+        }
+      }
+    });
+
+
+}
+
