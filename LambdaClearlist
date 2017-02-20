@@ -1,0 +1,159 @@
+var AWS = require('aws-sdk');
+var iotdata = new AWS.IotData({endpoint: '**Enter IoT Endpoint here'});
+ 
+exports.handler = function (event, context) {
+    console.log(event);
+    try {
+        console.log("event.session.application.applicationId=" + event.session.application.applicationId);
+ 
+        /**
+         * Uncomment this if statement and populate with your skill's application ID to
+         * prevent someone else from configuring a skill that sends requests to this function.
+         */
+       
+        if (event.session.application.applicationId !== "**Enter Alexa Skill App Name Here**") {
+             context.fail("Invalid Application ID");
+        }
+       
+ 
+       if (event.session.new) {
+            onSessionStarted({requestId: event.request.requestId}, event.session);
+        }
+ 
+        if (event.request.type === "LaunchRequest") {
+            onLaunch(event.request,
+                event.session,
+                function callback(sessionAttributes, speechletResponse) {
+                    context.succeed(buildResponse(sessionAttributes, speechletResponse));
+                });
+        } else if (event.request.type === "IntentRequest") {
+            onIntent(event.request,
+                event.session,
+                function callback(sessionAttributes, speechletResponse) {
+                    context.succeed(buildResponse(sessionAttributes, speechletResponse));
+                });
+        } else if (event.request.type === "SessionEndedRequest") {
+            onSessionEnded(event.request, event.session);
+            context.succeed();
+        }
+    } catch (e) {
+        context.fail("Exception: " + e);
+    }
+};
+ 
+/**
+* Called when the session starts.
+*/
+function onSessionStarted(sessionStartedRequest, session) { }
+ 
+/**
+* Called when the user launches the skill without specifying what they want.
+*/
+function onLaunch(launchRequest, session, callback) { getWelcomeResponse(callback); }
+ 
+/**
+* Called when the user specifies an intent for this skill.
+*/
+function onIntent(intentRequest, session, callback) {
+    console.log("onIntent requestId=" + intentRequest.requestId +", sessionId=" + session.sessionId);
+ 
+    var intent = intentRequest.intent, intentName = intentRequest.intent.name;
+ 
+    // Dispatch to your skill's intent handlers
+    if ("clearAlarms" === intentName) {
+        resetAlarms(intent, session, callback);
+    } else if ("ReportAlarm" === intentName) {
+        reportAlarm(intent, session, callback);
+    } else if ("MoreDetail" === intentName) {
+        moreDetail(intent, session, callback);
+    }
+    else if ("AMAZON.HelpIntent" === intentName) { getWelcomeResponse(callback);}
+    else if ("AMAZON.StopIntent" === intentName) {
+        callback({},
+            buildSpeechletResponse('exit', 'Thank you', '', true));
+    }
+    else {throw "Invalid intent";}
+}
+ 
+/**
+* Called when the user ends the session.
+* Is not called when the skill returns shouldEndSession=true.
+*/
+function onSessionEnded(sessionEndedRequest, session) {
+    console.log("onSessionEnded requestId=" + sessionEndedRequest.requestId +
+        ", sessionId=" + session.sessionId);
+    // Add cleanup logic here
+}
+ 
+// --------------- Functions that control the skill's behavior -----------------------
+ 
+function getWelcomeResponse(callback) {
+    callback({},
+        buildSpeechletResponse("welcome", "You're in the Security Center app,  how can I help", "You're in the Sock app,  how can I help", false));
+}
+ 
+function resetAlarms(intentRequest, session, callback) {
+    var clearAlarms = {
+            user: {
+              Username: 'Security Center User 1'
+            }
+          };
+ 
+          var params = {
+            topic: '/nato/clearlist', /* required */
+            payload: JSON.stringify(clearAlarms),
+            qos: 0
+          };
+          iotdata.publish(params, function(err, data) {
+            if (err) console.log(err, err.stack); // an error occurred
+            else
+            {
+                console.log('publish success: ' + data);           // successful response
+                callback({},
+                    buildSpeechletResponse("resetAlarms", "sure, clearing", "sure, resetting sock alarms", true));
+            }
+          });
+}
+ 
+function reportAlarm(intentRequest, session, callback) {
+    callback({},
+        buildSpeechletResponse("reportAlarm", "Alarm was detected on the Slack channel,  Person of interest Ben Snively identified",
+        "Alarm was detected on Slack channel,  Person of interest identified", false));
+}
+ 
+function moreDetail(intentRequest, session, callback) {
+    callback({},
+        buildSpeechletResponse("moreDetail", "Ben Snively is a person of interest who was born in Winter Park, FL -- and was last seen in the Washington D.C. area",  "Ben was born in Winter Park, FL -- and was last seen in the Washington D.C. area", false));
+}
+ 
+ 
+// --------------- Helpers that build all of the responses -----------------------
+ 
+function buildSpeechletResponse(title, output, repromptText, shouldEndSession) {
+    return {
+        outputSpeech: {
+            type: "PlainText",
+            text: output
+        },
+        card: {
+            type: "Simple",
+            title: "SessionSpeechlet - " + title,
+            content: "SessionSpeechlet - " + output
+        },
+        reprompt: {
+            outputSpeech: {
+                type: "PlainText",
+                text: repromptText
+            }
+        },
+        shouldEndSession: shouldEndSession
+    };
+}
+ 
+function buildResponse(sessionAttributes, speechletResponse) {
+    return {
+        version: "1.0",
+        sessionAttributes: sessionAttributes,
+        response: speechletResponse
+    };
+}
