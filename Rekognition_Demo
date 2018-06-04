@@ -1,0 +1,430 @@
+AWSTemplateFormatVersion: '2010-09-09'
+
+Parameters:
+  KeyAdministratorARNs:
+    Type: CommaDelimitedList
+
+  DistBucket:
+    Type: String
+
+  SlackAppId:
+    Type: String
+
+  SlackAppSecret:
+    Type: String
+    NoEcho: true
+
+  SlackVerificationToken:
+    Type: String
+    NoEcho: true
+
+  OAuthFuncVersion:
+    Type: String
+
+  EventFuncVersion:
+    Type: String
+
+  ProcessFuncVersion:
+    Type: String
+
+Resources:
+  KMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: RekognizerKeyPolicy
+        Statement:
+          -
+            Sid: Enable IAM user permissions
+            Effect: Allow
+            Principal:
+              AWS: !Sub 'arn:aws:iam::${AWS::AccountId}:root'
+            Action: kms:*
+            Resource: '*'
+          -
+            Sid: Access for key administrators
+            Effect: Allow
+            Principal:
+              AWS: !Ref KeyAdministratorARNs
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: '*'
+          -
+            Sid: Allow encryption with the key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt KMSEncryptRole.Arn
+                - !GetAtt SlackOAuthCallbackExecutionRole.Arn
+            Action:
+              - kms:Encrypt*
+            Resource: '*'
+          -
+            Sid: Allow decryption with the key
+            Effect: Allow
+            Principal:
+              AWS:
+                - !GetAtt SlackOAuthCallbackExecutionRole.Arn
+                - !GetAtt SlackEventProcessorExecutionRole.Arn
+                - !GetAtt SlackEventReceiverExecutionRole.Arn
+            Action:
+              - kms:Decrypt*
+            Resource: '*'
+
+  KMSKeyAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub 'alias/cfn/${AWS::StackName}'
+      TargetKeyId: !Ref KMSKey
+
+  KMSEncryptRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  KMSEncryptFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Description: Custom resource to encrypt a secret using KMS
+      Handler: index.lambda_handler
+      MemorySize: 128
+      Role: !GetAtt KMSEncryptRole.Arn
+      Runtime: python2.7
+      Timeout: 5
+      Environment:
+        Variables:
+          KMS_KEY_ID: !Ref KMSKeyAlias
+      Code:
+        ZipFile: |
+          import base64
+          import boto3
+          import json
+          import os
+
+          from botocore.vendored import requests
+
+          kms = boto3.client('kms')
+
+          KMS_KEY_ID = os.environ['KMS_KEY_ID']
+
+          def lambda_handler(event, context):
+              response_document = {
+                  'PhysicalResourceId': context.log_stream_name,
+                  'LogicalResourceId': event['LogicalResourceId'],
+                  'StackId': event['StackId'],
+                  'RequestId': event['RequestId']
+              }
+
+              if event['RequestType'] == 'Delete':
+                  response_document.update({'Status': 'SUCCESS'})
+              else:
+                  try:
+                      plaintext = event['ResourceProperties']['Plaintext']
+                      ciphertext = base64.b64encode(kms.encrypt(
+                          KeyId=KMS_KEY_ID, Plaintext=plaintext)['CiphertextBlob'])
+                  except Exception as e:
+                      response_document.update({'Status': 'FAILED', 'Reason': repr(e)})
+                  else:
+                      response_document.update(
+                          {'Status': 'SUCCESS', 'Data': {'Ciphertext': ciphertext}})
+
+              requests.put(event['ResponseURL'], json.dumps(response_document))
+
+  EncryptedSlackAppSecret:
+    Type: Custom::EncryptParameters
+    Properties:
+      ServiceToken: !GetAtt KMSEncryptFunction.Arn
+      Plaintext: !Ref SlackAppSecret
+
+  EncryptedSlackVerificationToken:
+    Type: Custom::EncryptParameters
+    Properties:
+      ServiceToken: !GetAtt KMSEncryptFunction.Arn
+      Plaintext: !Ref SlackVerificationToken
+
+  # Resources that won't break
+
+  S3Bucket:
+    Type: AWS::S3::Bucket
+
+  S3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3Bucket
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal: '*'
+            Action: s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${S3Bucket}/faces/*'
+
+  DynamoDBTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      AttributeDefinitions:
+        - AttributeName: team_id
+          AttributeType: S
+      KeySchema:
+        - AttributeName: team_id
+          KeyType: HASH
+      ProvisionedThroughput:
+        ReadCapacityUnits: 1
+        WriteCapacityUnits: 1
+
+  SlackEventReceiverExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - lambda:InvokeFunction
+            Resource: !GetAtt SlackEventProcessor.Arn
+
+  SlackEventReceiverExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      ManagedPolicyArns:
+        - !Ref SlackEventReceiverExecutionPolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  SlackEventReceiver:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: receive_event.lambda_handler
+      Runtime: python2.7
+      Role: !GetAtt SlackEventReceiverExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref DistBucket
+        S3Key: receive_event.zip
+        S3ObjectVersion: !Ref EventFuncVersion
+      Environment:
+        Variables:
+          SLACK_VERIFICATION_TOKEN: !GetAtt EncryptedSlackVerificationToken.Ciphertext
+          ASYNC_FUNCTION_NAME: !Ref SlackEventProcessor
+
+  SlackEventProcessorExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+            Resource: !Sub 'arn:aws:s3:::${S3Bucket}/*'
+          -
+            Effect: Allow
+            Action:
+              - dynamodb:GetItem
+            Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}'
+          -
+            Effect: Allow
+            Action:
+              - rekognition:*
+            Resource: '*'
+
+  SlackEventProcessorExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      ManagedPolicyArns:
+        - !Ref SlackEventProcessorExecutionPolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  SlackEventProcessor:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: process_event.lambda_handler
+      Runtime: python2.7
+      Role: !GetAtt SlackEventProcessorExecutionRole.Arn
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref DistBucket
+        S3Key: process_event.zip
+        S3ObjectVersion: !Ref ProcessFuncVersion
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DynamoDBTable
+          S3_BUCKET: !Ref S3Bucket
+
+  SlackOAuthCallbackExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Action:
+              - dynamodb:PutItem
+            Resource: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${DynamoDBTable}'
+
+  SlackOAuthCallbackExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Path: '/'
+      ManagedPolicyArns:
+        - !Ref SlackOAuthCallbackExecutionPolicy
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  SlackOAuthCallback:
+    Type: AWS::Lambda::Function
+    Properties:
+      Handler: oauth_callback.lambda_handler
+      Runtime: python2.7
+      Role: !GetAtt SlackOAuthCallbackExecutionRole.Arn
+      Code:
+        S3Bucket: !Ref DistBucket
+        S3Key: oauth_callback.zip
+        S3ObjectVersion: !Ref OAuthFuncVersion
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref DynamoDBTable
+          KMS_KEY_ID: !Ref KMSKeyAlias
+          SLACK_CLIENT_ID: !Ref SlackAppId
+          SLACK_CLIENT_SECRET: !GetAtt EncryptedSlackAppSecret.Ciphertext
+
+  RekognizerApi:
+    Type: AWS::ApiGateway::RestApi
+    Properties:
+      Body:
+        swagger: 2.0
+        info:
+          version: 2016-12-08
+          title: Rekognizer
+        paths:
+          /event:
+            post:
+              consumes:
+                - application/json
+              produces:
+                - application/json
+              responses:
+                "200":
+                  description: 200 response
+              x-amazon-apigateway-integration:
+                type: aws
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${SlackEventReceiver}/invocations'
+                httpMethod: POST
+                responses:
+                  default:
+                    statusCode: 200
+          /callback:
+            get:
+              consumes:
+                - application/json
+              produces:
+                - application/json
+              parameters:
+                -
+                  name: code
+                  in: query
+                  required: true
+                  type: string
+                -
+                  name: state
+                  in: query
+                  required: false
+                  type: string
+              responses:
+                "200":
+                  description: 200 response
+              x-amazon-apigateway-integration:
+                type: aws
+                uri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${SlackOAuthCallback}/invocations'
+                httpMethod: POST
+                responses:
+                  default:
+                    statusCode: 200
+                requestTemplates:
+                  application/json: |
+                    ## Map the query parameters for an OAuth callback
+                    ## https://api.slack.com/docs/oauth#step_2_-_token_issuing
+                    {
+                      "code": "$input.params('code')",
+                      "state": "$input.params('state')"
+                    }
+
+  RekognizerApiDeployment:
+    Type: AWS::ApiGateway::Deployment
+    Properties:
+      RestApiId: !Ref RekognizerApi
+      Description: Initial deployment
+      StageName: prod
+
+  SlackEventReceiverHttpPostPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      Principal: apigateway.amazonaws.com
+      FunctionName: !Ref SlackEventReceiver
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RekognizerApi}/*/POST/event
+
+  SlackOAuthCallbackHttpGetPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:invokeFunction
+      Principal: apigateway.amazonaws.com
+      FunctionName: !Ref SlackOAuthCallback
+      SourceArn: !Sub arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${RekognizerApi}/*/GET/callback
+
+Outputs:
+  OAuthCallbackUrl:
+    Value: !Sub https://${RekognizerApi}.execute-api.${AWS::Region}.amazonaws.com/prod/callback
+
+  EventTargetUrl:
+    Value: !Sub https://${RekognizerApi}.execute-api.${AWS::Region}.amazonaws.com/prod/event
